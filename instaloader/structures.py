@@ -214,17 +214,32 @@ class Post:
 
     @classmethod
     def from_iphone_struct(cls, context: InstaloaderContext, media: Dict[str, Any]):
-        """Create a post from a given iphone_struct.
+        # 만약 media 딕셔너리가 이미 "media" 키를 포함한다면 내부 값을 사용합니다.
+        if "media" in media and isinstance(media["media"], dict):
+            media = media["media"]
+        
+        # pk 또는 id 값 추출 (둘 중 하나라도 있으면 사용)
+        pk_value = media.get("pk", media.get("id"))
+        if pk_value is None:
+            raise BadResponseException("미디어 항목에 'pk' 또는 'id' 값이 없습니다: {}".format(media))
+        
+        # code 값 추출: 있으면 그대로, 없으면 pk_value로부터 계산
+        shortcode = media.get("code")
+        if shortcode is None:
+            try:
+                shortcode = Post.mediaid_to_shortcode(pk_value)
+            except Exception as e:
+                raise BadResponseException("shortcode 계산 실패: {}".format(e)) from e
 
-        .. versionadded:: 4.9"""
         media_types = {
             1: "GraphImage",
             2: "GraphVideo",
             8: "GraphSidecar",
         }
+        
         fake_node = {
-            "shortcode": media["code"],
-            "id": media["pk"],
+            "shortcode": shortcode,
+            "id": pk_value,
             "__typename": media_types[media["media_type"]],
             "is_video": media_types[media["media_type"]] == "GraphVideo",
             "date": media["taken_at"],
@@ -237,16 +252,18 @@ class Post:
             "iphone_struct": media,
         }
         with suppress(KeyError):
-            fake_node["display_url"] = media['image_versions2']['candidates'][0]['url']
+            fake_node["display_url"] = media["image_versions2"]["candidates"][0]["url"]
         with suppress(KeyError, TypeError):
-            fake_node["video_url"] = media['video_versions'][-1]['url']
+            fake_node["video_url"] = media["video_versions"][-1]["url"]
             fake_node["video_duration"] = media["video_duration"]
             fake_node["video_view_count"] = media["view_count"]
         with suppress(KeyError, TypeError):
-            fake_node["edge_sidecar_to_children"] = {"edges": [{"node":
-                Post._convert_iphone_carousel(node, media_types)}
-                for node in media["carousel_media"]]}
+            fake_node["edge_sidecar_to_children"] = {"edges": [
+                {"node": Post._convert_iphone_carousel(node, media_types)}
+                for node in media["carousel_media"]
+            ]}
         return cls(context, fake_node, Profile.from_iphone_struct(context, media["user"]) if "user" in media else None)
+
 
     @staticmethod
     def _convert_iphone_carousel(iphone_node: Dict[str, Any], media_types: Dict[int, str]) -> Dict[str, Any]:
