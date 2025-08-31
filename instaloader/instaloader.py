@@ -1094,6 +1094,18 @@ class Instaloader:
                         # disengage fast_update for first post when resuming
                         if not is_resuming or number > 0:
                             break
+            
+            # 다운로드 완료 시 resume 파일 삭제
+            if self.resume_prefix and hasattr(posts, 'magic'):
+                try:
+                    resume_file_path = self.format_filename_within_target_path(
+                        sanitized_target, owner_profile, self.resume_prefix or '', posts.magic, 'json.xz'
+                    )
+                    if os.path.isfile(resume_file_path):
+                        os.unlink(resume_file_path)
+                        self.context.log("Download complete, deleted resume file: {}".format(resume_file_path))
+                except Exception:
+                    pass  # 삭제 실패 시 무시
 
     @_requires_login
     def get_feed_posts(self) -> Iterator[Post]:
