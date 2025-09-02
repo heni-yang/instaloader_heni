@@ -217,7 +217,7 @@ class Post:
         """Create a post from a given iphone_struct.
 
         .. versionadded:: 4.9"""
-	media_caption = media.get("edge_media_to_caption")
+        media_caption = media.get("edge_media_to_caption")
         fake_node = {
             "shortcode": media["shortcode"],
             "id": media["id"],
