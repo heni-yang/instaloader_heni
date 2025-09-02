@@ -1040,7 +1040,7 @@ class Instaloader:
                     sanitized_target, owner_profile, self.resume_prefix or '', magic, 'json.xz'
                 ),
                 check_bbd=self.check_resume_bbd,
-                enabled=self.resume_prefix is not None
+                enabled=True  # 강제로 resume 기능 활성화
         ) as (is_resuming, start_index):
             for number, post in enumerate(posts, start=start_index + 1):
                 should_stop = not takewhile(post)
@@ -1048,6 +1048,18 @@ class Instaloader:
                     continue
                 if (max_count is not None and number > max_count) or should_stop:
                     break
+                
+                # 매 포스트마다 resume 파일 업데이트 (진행 상태 저장)
+                if self.resume_prefix and hasattr(posts, 'freeze'):
+                    try:
+                        current_frozen = posts.freeze()
+                        resume_file_path = self.format_filename_within_target_path(
+                            sanitized_target, owner_profile, self.resume_prefix or '', posts.magic, 'json.xz'
+                        )
+                        save_structure_to_file(current_frozen, resume_file_path)
+                        self.context.log(f"[RESUME DEBUG] 진행 상태 저장: {number}번째 포스트, total_index={current_frozen.total_index}")
+                    except Exception as e:
+                        self.context.log(f"[RESUME DEBUG] 진행 상태 저장 실패: {e}")
                 if displayed_count is not None:
                     self.context.log("[{0:{w}d}/{1:{w}d}] ".format(number, displayed_count,
                                                                    w=len(str(displayed_count))),
@@ -1082,6 +1094,18 @@ class Instaloader:
                         # disengage fast_update for first post when resuming
                         if not is_resuming or number > 0:
                             break
+            
+            # 다운로드 완료 시 resume 파일 삭제
+            if self.resume_prefix and hasattr(posts, 'magic'):
+                try:
+                    resume_file_path = self.format_filename_within_target_path(
+                        sanitized_target, owner_profile, self.resume_prefix or '', posts.magic, 'json.xz'
+                    )
+                    if os.path.isfile(resume_file_path):
+                        os.unlink(resume_file_path)
+                        self.context.log("Download complete, deleted resume file: {}".format(resume_file_path))
+                except Exception:
+                    pass  # 삭제 실패 시 무시
 
     @_requires_login
     def get_feed_posts(self) -> Iterator[Post]:
