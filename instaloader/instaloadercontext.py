@@ -777,7 +777,7 @@ class RateController:
 
         # Enhanced anti-detection features
         self._consecutive_requests = 0
-        self._last_request_type = None
+        self._last_request_type: Optional[str] = None
         self._session_start_time = time.monotonic()
         self._last_break_time = time.monotonic()
         self._request_count = 0
