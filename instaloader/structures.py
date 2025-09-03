@@ -1173,7 +1173,7 @@ class Profile:
     def get_profile_pic_url(self) -> str:
         """.. deprecated:: 4.0.3
 
-	   Use :attr:`profile_pic_url`."""
+        Use :attr:`profile_pic_url`."""
         return self.profile_pic_url
 
     def get_posts(self) -> NodeIterator[Post]:
