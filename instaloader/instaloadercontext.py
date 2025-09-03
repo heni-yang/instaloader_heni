@@ -509,7 +509,8 @@ class InstaloaderContext:
                     if is_other_query:
                         self._rate_controller.handle_429('other')
                 return self.get_json(path=path, params=params, host=host, session=sess,
-                                     _attempt=_attempt + 1, response_headers=response_headers)
+                                     _attempt=_attempt + 1,
+                                     response_headers=response_headers)
             except KeyboardInterrupt:
                 self.error("[skipped by user]", repeat_at_end=False)
                 raise ConnectionException(error_string) from err
