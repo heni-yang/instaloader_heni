@@ -802,7 +802,7 @@ class RateController:
         # whether we are logged in.
         
         if not self._human_behavior_enabled:
-        time.sleep(secs)
+            time.sleep(secs)
             return
             
         # Apply random jitter to avoid predictable patterns
