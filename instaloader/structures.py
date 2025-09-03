@@ -225,7 +225,8 @@ class Post:
             "__typename": media["__typename"],
             "is_video": media["__typename"] == "GraphVideo",
             "date": media["taken_at_timestamp"],
-            "caption": media_caption["edges"][0]["node"].get("text") if media_caption and media_caption.get("edges") else None,
+            "caption": (media_caption["edges"][0]["node"].get("text") 
+                       if media_caption and media_caption.get("edges") else None),
             # "title": media.get("title"),
             "viewer_has_liked": media.get("viewer_has_liked"),
             "edge_media_preview_like": media["edge_media_preview_like"],
