@@ -460,8 +460,6 @@ class InstaloaderContext:
                 raise QueryReturnedBadRequestException(self._response_error(resp))
             if resp.status_code == 404:
                 raise QueryReturnedNotFoundException(self._response_error(resp))
-            if resp.status_code == 403:
-                raise QueryReturnedForbiddenException(self._response_error(resp))
             if resp.status_code == 429:
                 raise TooManyRequestsException(self._response_error(resp))
             if resp.status_code != 200:
@@ -474,29 +472,10 @@ class InstaloaderContext:
         except (ConnectionException, json.decoder.JSONDecodeError, requests.exceptions.RequestException) as err:
             error_string = "JSON Query to {}: {}".format(path, err)
             if _attempt == self.max_connection_attempts:
-                # For 403 errors, allow up to 5 attempts regardless of max_connection_attempts
-                if isinstance(err, QueryReturnedForbiddenException) and _attempt < 5:
-                    pass  # Continue to 403 retry logic below
-                elif isinstance(err, QueryReturnedNotFoundException):
+                if isinstance(err, QueryReturnedNotFoundException):
                     raise QueryReturnedNotFoundException(error_string) from err
-                elif isinstance(err, QueryReturnedForbiddenException):
-                    raise QueryReturnedForbiddenException(error_string) from err
                 else:
                     raise ConnectionException(error_string) from err
-            # Retry 403 Forbidden errors up to 5 times with increasing delays
-            if isinstance(err, QueryReturnedForbiddenException):
-                if _attempt >= 5:  # Allow up to 5 attempts for 403 errors
-                    raise QueryReturnedForbiddenException(error_string) from err
-                else:
-                    # Progressive delay for 403 retries: 2s, 4s, 8s, 16s
-                    forbidden_delay = min(2 ** _attempt, 16)
-                    self.error(f"403 Forbidden (attempt {_attempt}/5), retrying in {forbidden_delay}s...", repeat_at_end=False)
-                    time.sleep(forbidden_delay)
-                    # Retry the request
-                    return self.get_json(path=path, params=params, host=host, session=sess,
-                                       _attempt=_attempt + 1,
-                                       response_headers=response_headers)
-
             self.error(error_string + " [retrying; skip with ^C]", repeat_at_end=False)
             try:
                 if isinstance(err, TooManyRequestsException):
