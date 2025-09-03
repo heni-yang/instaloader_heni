@@ -80,9 +80,14 @@ html_js_files = ['instaloaderdoc.js']
 
 # get release number
 
-current_release = subprocess.check_output(["git", "describe", "--abbrev=0"]).decode("ascii")[1:-1]
-date_format = "%e %b %Y" if platform.system() != "Windows" else "%d %b %Y"
-current_release_date = subprocess.check_output(
-    ["git", "log", "-1", "--tags", "--format=%ad", "--date=format:"+date_format]).decode("ascii")[:-1]
+try:
+    current_release = subprocess.check_output(["git", "describe", "--abbrev=0"]).decode("ascii")[1:-1]
+    date_format = "%e %b %Y" if platform.system() != "Windows" else "%d %b %Y"
+    current_release_date = subprocess.check_output(
+        ["git", "log", "-1", "--tags", "--format=%ad", "--date=format:"+date_format]).decode("ascii")[:-1]
+except subprocess.CalledProcessError:
+    # Fallback when git describe fails (e.g., in shallow clones or no tags)
+    current_release = "unknown"
+    current_release_date = "unknown"
 
 html_context = {'current_release': current_release, 'current_release_date': current_release_date}

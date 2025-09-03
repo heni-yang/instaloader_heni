@@ -494,7 +494,8 @@ class InstaloaderContext:
                     time.sleep(forbidden_delay)
                     # Retry the request
                     return self.get_json(path=path, params=params, host=host, session=sess,
-                                       _attempt=_attempt + 1, response_headers=response_headers)
+                                       _attempt=_attempt + 1,
+                                       response_headers=response_headers)
 
             self.error(error_string + " [retrying; skip with ^C]", repeat_at_end=False)
             try:
@@ -896,11 +897,11 @@ class RateController:
 
         # Calculate base wait time using original logic
         base_wait_time = max(0.0,
-                   max(
-                       per_type_next_request_time(),
-                       gql_accumulated_next_request_time(),
-                       untracked_next_request_time(),
-                       iphone_next_request(),
+                            max(
+                                per_type_next_request_time(),
+                                gql_accumulated_next_request_time(),
+                                untracked_next_request_time(),
+                                iphone_next_request(),
                    ) - current_time)
 
         # Apply anti-detection enhancements
@@ -930,7 +931,6 @@ class RateController:
 
         # 3. Session duration and request count based adjustments
         session_duration = current_time - self._session_start_time
-        time_since_break = current_time - self._last_break_time
 
         # Gradually increase wait time as session progresses
         if session_duration > 3600:  # After 1 hour
