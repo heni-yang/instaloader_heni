@@ -763,13 +763,13 @@ class RateController:
 
         # Configurable parameters for anti-detection
         self._base_jitter_range = (0.8, 1.2)  # ±20% randomization
-        self._consecutive_penalty_factor = 0.5  # Additional wait per consecutive request
+        self._consecutive_penalty_factor = 0.2  # Additional wait per consecutive request (reduced from 0.5)
         self._max_consecutive_penalty = 5.0  # Maximum penalty in seconds
-        self._peak_hours_multiplier = 1.5  # Multiplier during peak hours (9AM-9PM)
-        self._break_threshold_time = 1800  # 30 minutes
-        self._break_threshold_requests = 100
-        self._min_break_time = 30  # Minimum break time in seconds
-        self._max_break_time = 300  # Maximum break time in seconds
+        self._peak_hours_multiplier = 1.2  # Multiplier during peak hours (9AM-9PM) (reduced from 1.5)
+        self._break_threshold_time = 3600  # 60 minutes (increased from 30 minutes)
+        self._break_threshold_requests = 150  # Increased from 100
+        self._min_break_time = 15  # Minimum break time in seconds (reduced from 30)
+        self._max_break_time = 150  # Maximum break time in seconds (reduced from 300)
 
     def sleep(self, secs: float):
         """Enhanced sleep with human-like behavior patterns."""
@@ -815,7 +815,7 @@ class RateController:
         control."""
         # Not static, to allow for the count_per_sliding_window to depend on context-inherent properties, such as
         # whether we are logged in.
-        return 75 if query_type == 'other' else 200
+        return 90 if query_type == 'other' else 250
 
     def _reqs_in_sliding_window(self, query_type: Optional[str], current_time: float, window: float) -> List[float]:
         if query_type is not None:
@@ -848,7 +848,7 @@ class RateController:
             if query_type in ['iphone', 'other']:
                 return 0.0
             gql_accumulated_sliding_window = 600
-            gql_accumulated_max_count = 275
+            gql_accumulated_max_count = 330
             reqs_in_sliding_window = self._reqs_in_sliding_window(None, current_time, gql_accumulated_sliding_window)
             if len(reqs_in_sliding_window) < gql_accumulated_max_count:
                 return 0.0
@@ -870,7 +870,7 @@ class RateController:
         def iphone_next_request():
             if query_type == "iphone":
                 reqs_in_sliding_window = self._reqs_in_sliding_window(query_type, current_time, iphone_sliding_window)
-                if len(reqs_in_sliding_window) >= 199:
+                if len(reqs_in_sliding_window) >= 230:
                     return min(reqs_in_sliding_window) + iphone_sliding_window + 18
             return 0.0
 
@@ -912,15 +912,15 @@ class RateController:
         session_duration = current_time - self._session_start_time
 
         # Gradually increase wait time as session progresses
-        if session_duration > 3600:  # After 1 hour
-            session_multiplier = 1 + (session_duration - 3600) / 7200  # +50% after 3 hours
-            enhanced_wait *= min(session_multiplier, 2.0)  # Cap at 2x
+        if session_duration > 5400:  # After 1.5 hours
+            session_multiplier = 1 + (session_duration - 5400) / 14400  # +50% after 5.5 hours
+            enhanced_wait *= min(session_multiplier, 1.5)  # Cap at 1.5x
 
         # 4. Frequency-based adjustments (recent request density)
-        recent_requests = self._count_recent_requests(current_time, 300)  # Last 5 minutes
-        if recent_requests > 10:
-            frequency_multiplier = 1 + (recent_requests - 10) / 20
-            enhanced_wait *= min(frequency_multiplier, 3.0)  # Cap at 3x
+        recent_requests = self._count_recent_requests(current_time, 600)  # Last 10 minutes
+        if recent_requests > 20:
+            frequency_multiplier = 1 + (recent_requests - 20) / 40
+            enhanced_wait *= min(frequency_multiplier, 2.0)  # Cap at 2x
 
         # 5. Check if a break is needed
         if self._should_take_human_break(current_time):
@@ -950,13 +950,13 @@ class RateController:
         session_duration = current_time - self._session_start_time
 
         # Break conditions
-        if (current_time - self._last_break_time > self._break_threshold_time or  # 30+ minutes since last break
-            self._request_count > self._break_threshold_requests or  # 100+ requests
-            session_duration > 7200):  # 2+ hours total session
+        if (current_time - self._last_break_time > self._break_threshold_time or  # 60+ minutes since last break
+            self._request_count > self._break_threshold_requests or  # 150+ requests
+            session_duration > 14400):  # 4+ hours total session
             return True
 
-        # Random break (2% chance)
-        return random.random() < 0.02
+        # Random break (1% chance)
+        return random.random() < 0.01
 
     def _calculate_break_duration(self) -> float:
         """Calculate a realistic break duration."""
