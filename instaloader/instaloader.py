@@ -1114,23 +1114,79 @@ class Instaloader:
         :return: Iterator over Posts of the user's feed.
         :raises LoginRequiredException: If called without being logged in.
         """
+        import json
+        from instaloader.instaloadercontext import copy_session
+        
+        doc_id = "26171541555817400"
+        variables = {
+            "after": "",
+            "before": None,
+            "data": {
+                "device_id": "DF300343-5F03-4D53-8D25-B84FE33A9F27",
+                "is_async_ads_double_request": "0",
+                "is_async_ads_in_headload_enabled": "0",
+                "is_async_ads_rti": "0",
+                "rti_delivery_backend": "0"
+            },
+            "first": 12,
+            "last": None,
+            "variant": "home"
+        }
 
-        data = self.context.graphql_query("d6f4427fbe92d846298cf93df0b937d3", {})["data"]
+        def custom_query(vars_dict):
+            with copy_session(self.context._session, self.context.request_timeout) as tmpsession:
+                tmpsession.headers.update(self.context._default_http_header(empty_session_only=True))
+                if 'Connection' in tmpsession.headers: del tmpsession.headers['Connection']
+                if 'Content-Length' in tmpsession.headers: del tmpsession.headers['Content-Length']
+                tmpsession.headers['authority'] = 'www.instagram.com'
+                tmpsession.headers['scheme'] = 'https'
+                tmpsession.headers['accept'] = '*/*'
+                variables_json = json.dumps(vars_dict, separators=(',', ':'))
+                return self.context.get_json('graphql/query',
+                                          params={'doc_id': doc_id, 'variables': variables_json},
+                                          session=tmpsession)
 
+        data = custom_query(variables).get("data")
+        
         while True:
-            feed = data["user"]["edge_web_feed_timeline"]
-            for edge in feed["edges"]:
+            if data is None:
+                return
+            
+            feed = data.get("xdt_api__v1__feed__timeline__connection")
+            if feed is None:
+                return
+                
+            for edge in feed.get("edges", []):
                 node = edge["node"]
-                if node.get("__typename") in Post.supported_graphql_types() and node.get("shortcode") is not None:
-                    yield Post(self.context, node)
-            if not feed["page_info"]["has_next_page"]:
+                
+                # Extract media from the nested structure
+                target_media = node.get("media") or \
+                               (node.get("explore_story") or {}).get("media") or \
+                               node.get("ad")
+                               
+                if target_media and target_media.get("pk") is not None:
+                    # Provide an artificially constructed node that resembles classical graphql for Post()
+                    # Instaloader Post() uses "__typename" and "shortcode" for validation.
+                    # We inject __typename and shortcode if missing to allow Post() parsing
+                    if "__typename" not in target_media:
+                        target_media["__typename"] = "GraphImage" # Dummy fallback
+                    if "shortcode" not in target_media and "code" in target_media:
+                        target_media["shortcode"] = target_media["code"]
+                    if "taken_at_timestamp" not in target_media and "taken_at" in target_media:
+                        target_media["taken_at_timestamp"] = target_media["taken_at"]
+                        
+                    # Also map 'owner' properly if the json only provided 'user'
+                    if "owner" not in target_media and "user" in target_media:
+                        target_media["owner"] = target_media["user"]
+                        
+                    yield Post(self.context, target_media)
+                    
+            page_info = feed.get("page_info", {})
+            if not page_info.get("has_next_page", False):
                 break
-            data = self.context.graphql_query("d6f4427fbe92d846298cf93df0b937d3",
-                                              {'fetch_media_item_count': 12,
-                                               'fetch_media_item_cursor': feed["page_info"]["end_cursor"],
-                                               'fetch_comment_count': 4,
-                                               'fetch_like': 10,
-                                               'has_stories': False})["data"]
+                
+            variables["after"] = page_info.get("end_cursor", "")
+            data = custom_query(variables).get("data")
 
     @_requires_login
     def download_feed_posts(self, max_count: Optional[int] = None, fast_update: bool = False,
