@@ -32,7 +32,7 @@ def copy_session(session: requests.Session, request_timeout: Optional[float] = N
 
 def default_user_agent() -> str:
     return ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-            '(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36')
+            '(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36')
 
 
 def default_iphone_headers() -> Dict[str, Any]:
@@ -181,8 +181,8 @@ class InstaloaderContext:
                 raise
 
     def _default_http_header(self, empty_session_only: bool = False) -> Dict[str, str]:
-        """Returns default HTTP header we use for requests."""
-        header = {'Accept-Encoding': 'gzip, deflate',
+        """Returns our default HTTP header."""
+        header = {'Accept-Encoding': 'gzip, deflate, br',
                   'Accept-Language': 'en-US,en;q=0.8',
                   'Connection': 'keep-alive',
                   'Content-Length': '0',
@@ -220,14 +220,22 @@ class InstaloaderContext:
         self._session.cookies.update(cookie)
 
     def load_session(self, username, sessiondata):
-        """Not meant to be used directly, use :meth:`Instaloader.load_session`."""
+        """Enhanced session loading with anti-detection features."""
         session = requests.Session()
         session.cookies = requests.utils.cookiejar_from_dict(sessiondata)
+
+        # Apply enhanced headers
         session.headers.update(self._default_http_header())
-        session.headers.update({'X-CSRFToken': session.cookies.get_dict()['csrftoken']})
+
+        # Add CSRF token if available
+        csrf_token = session.cookies.get_dict().get('csrftoken', '')
+        if csrf_token:
+            session.headers.update({'X-CSRFToken': csrf_token})
+
         # Override default timeout behavior.
         # Need to silence mypy bug for this. See: https://github.com/python/mypy/issues/2427
         session.request = partial(session.request, timeout=self.request_timeout)  # type: ignore
+
         self._session = session
         self.username = username
 
@@ -277,6 +285,7 @@ class InstaloaderContext:
         # Make a request to Instagram's root URL, which will set the session's csrftoken cookie
         # Not using self.get_json() here, because we need to access the cookie
         session.get('https://www.instagram.com/')
+
         # Add session's csrftoken cookie to session headers
         csrf_token = session.cookies.get_dict()['csrftoken']
         session.headers.update({'X-CSRFToken': csrf_token})
@@ -395,7 +404,10 @@ class InstaloaderContext:
         :param session: Session to use, or None to use self.session
         :param use_post: Use POST instead of GET to make the request
         :return: Decoded response dictionary
-        :raises QueryReturnedBadRequestException: When the server responds with a 400.
+        :raises AbortDownloadException: When the server responds with
+            'feedback_required'/'checkpoint_required'/'challenge_required'
+        :raises QueryReturnedBadRequestException: When the server responds with a 400 (and not
+            'feedback_required'/'checkpoint_required'/'challenge_required').
         :raises QueryReturnedNotFoundException: When the server responds with a 404.
         :raises ConnectionException: When query repeatedly failed.
 
@@ -425,7 +437,7 @@ class InstaloaderContext:
                 redirect = " redirect to {}".format(resp.headers['location']) if 'location' in resp.headers else ""
                 body = ""
                 if resp.headers['Content-Type'].startswith('application/json'):
-                    body = ': ' + resp.text[:500] + ('…' if len(resp.text) > 501 else '')
+                    body = ': ' + resp.text[:500] + ('...' if len(resp.text) > 501 else '')
                 raise AbortDownloadException("Query to https://{}/{} responded with \"{} {}\"{}{}".format(
                     host, path, resp.status_code, resp.reason, redirect, body
                 ))
@@ -447,6 +459,15 @@ class InstaloaderContext:
                 response_headers.clear()
                 response_headers.update(resp.headers)
             if resp.status_code == 400:
+                with suppress(json.decoder.JSONDecodeError):
+                    if resp.json().get("message") in [
+                        "feedback_required",
+                        "checkpoint_required",
+                        "challenge_required",
+                    ]:
+                        # Raise AbortDownloadException in case of substantial Instagram
+                        # requirements to stop producing more requests
+                        raise AbortDownloadException(self._response_error(resp))
                 raise QueryReturnedBadRequestException(self._response_error(resp))
             if resp.status_code == 404:
                 raise QueryReturnedNotFoundException(self._response_error(resp))
@@ -477,7 +498,8 @@ class InstaloaderContext:
                         self._rate_controller.handle_429('iphone')
                     if is_other_query:
                         self._rate_controller.handle_429('other')
-                return self.get_json(path=path, params=params, host=host, session=sess, _attempt=_attempt + 1,
+                return self.get_json(path=path, params=params, host=host, session=sess,
+                                     _attempt=_attempt + 1,
                                      response_headers=response_headers)
             except KeyboardInterrupt:
                 self.error("[skipped by user]", repeat_at_end=False)
@@ -717,7 +739,13 @@ class InstaloaderContext:
 
 class RateController:
     """
-    Class providing request tracking and rate controlling to stay within rate limits.
+    Enhanced Class providing request tracking and rate controlling to stay within rate limits.
+
+    Now includes anti-detection features:
+    - Dynamic wait times based on usage patterns
+    - Random jitter to avoid predictable patterns
+    - Human-like behavior simulation
+    - Time-of-day based adjustments
 
     It can be overridden to change Instaloader's behavior regarding rate limits, for example to raise a custom
     exception when the rate limit is hit::
@@ -737,11 +765,46 @@ class RateController:
         self._earliest_next_request_time = 0.0
         self._iphone_earliest_next_request_time = 0.0
 
+        # Enhanced anti-detection features
+        self._consecutive_requests = 0
+        self._last_request_type: Optional[str] = None
+        self._session_start_time = time.monotonic()
+        self._last_break_time = time.monotonic()
+        self._request_count = 0
+        self._human_behavior_enabled = True  # Can be controlled via context
+
+        # Configurable parameters for anti-detection
+        self._base_jitter_range = (0.8, 1.2)  # ±20% randomization
+        self._consecutive_penalty_factor = 0.1  # Additional wait per consecutive request (further reduced for external use)
+        self._max_consecutive_penalty = 5.0  # Maximum penalty in seconds
+        self._peak_hours_multiplier = 1.1  # Multiplier during peak hours (9AM-9PM) (further reduced for external use)
+        self._break_threshold_time = 7200  # 120 minutes (increased for external use)
+        self._break_threshold_requests = 200  # Increased for external use
+        self._min_break_time = 10  # Minimum break time in seconds (further reduced for external use)
+        self._max_break_time = 60  # Maximum break time in seconds (further reduced for external use)
+
     def sleep(self, secs: float):
-        """Wait given number of seconds."""
+        """Enhanced sleep with human-like behavior patterns."""
         # Not static, to allow for the behavior of this method to depend on context-inherent properties, such as
         # whether we are logged in.
-        time.sleep(secs)
+
+        if not self._human_behavior_enabled:
+            time.sleep(secs)
+            return
+
+        # Apply random jitter to avoid predictable patterns
+        if secs > 0:
+            jitter = random.uniform(*self._base_jitter_range)
+            actual_sleep = secs * jitter
+
+            # Log the enhanced sleep behavior (only if context supports it)
+            if hasattr(self._context, 'log') and not self._context.quiet:
+                self._context.log(f"[ANTI-DETECTION] Sleeping {actual_sleep:.2f}s (base: {secs:.2f}s, jitter: {jitter:.2f})")
+
+            time.sleep(actual_sleep)
+
+        # Update request tracking
+        self._request_count += 1
 
     def _dump_query_timestamps(self, current_time: float, failed_query_type: str):
         windows = [10, 11, 20, 22, 30, 60]
@@ -764,7 +827,7 @@ class RateController:
         control."""
         # Not static, to allow for the count_per_sliding_window to depend on context-inherent properties, such as
         # whether we are logged in.
-        return 75 if query_type == 'other' else 200
+        return 90 if query_type == 'other' else 250
 
     def _reqs_in_sliding_window(self, query_type: Optional[str], current_time: float, window: float) -> List[float]:
         if query_type is not None:
@@ -778,7 +841,7 @@ class RateController:
         return list(filter(lambda t: t > current_time - window, relevant_timestamps))
 
     def query_waittime(self, query_type: str, current_time: float, untracked_queries: bool = False) -> float:
-        """Calculate time needed to wait before query can be executed."""
+        """Enhanced calculation of wait time with anti-detection features."""
         per_type_sliding_window = 660
         iphone_sliding_window = 1800
         if query_type not in self._query_timestamps:
@@ -797,7 +860,7 @@ class RateController:
             if query_type in ['iphone', 'other']:
                 return 0.0
             gql_accumulated_sliding_window = 600
-            gql_accumulated_max_count = 275
+            gql_accumulated_max_count = 330
             reqs_in_sliding_window = self._reqs_in_sliding_window(None, current_time, gql_accumulated_sliding_window)
             if len(reqs_in_sliding_window) < gql_accumulated_max_count:
                 return 0.0
@@ -819,23 +882,114 @@ class RateController:
         def iphone_next_request():
             if query_type == "iphone":
                 reqs_in_sliding_window = self._reqs_in_sliding_window(query_type, current_time, iphone_sliding_window)
-                if len(reqs_in_sliding_window) >= 199:
+                if len(reqs_in_sliding_window) >= 230:
                     return min(reqs_in_sliding_window) + iphone_sliding_window + 18
             return 0.0
 
-        return max(0.0,
-                   max(
-                       per_type_next_request_time(),
-                       gql_accumulated_next_request_time(),
-                       untracked_next_request_time(),
-                       iphone_next_request(),
+        # Calculate base wait time using original logic
+        base_wait_time = max(0.0,
+                            max(
+                                per_type_next_request_time(),
+                                gql_accumulated_next_request_time(),
+                                untracked_next_request_time(),
+                                iphone_next_request(),
                    ) - current_time)
 
+        # Apply anti-detection enhancements
+        if self._human_behavior_enabled:
+            enhanced_wait_time = self._apply_anti_detection_wait(base_wait_time, query_type, current_time)
+            return enhanced_wait_time
+
+        return base_wait_time
+
+    def _apply_anti_detection_wait(self, base_wait_time: float, query_type: str, current_time: float) -> float:
+        """Apply anti-detection enhancements to the base wait time."""
+        enhanced_wait = base_wait_time
+
+        # 1. Consecutive request penalty
+        if query_type == self._last_request_type:
+            self._consecutive_requests += 1
+            penalty = min(self._consecutive_requests * self._consecutive_penalty_factor, self._max_consecutive_penalty)
+            enhanced_wait += penalty
+        else:
+            self._consecutive_requests = 0
+            self._last_request_type = query_type
+
+        # 2. Time-of-day adjustments (peak hours: 9AM-9PM)
+        current_hour = datetime.now().hour
+        if 9 <= current_hour <= 21:
+            enhanced_wait *= self._peak_hours_multiplier
+
+        # 3. Session duration and request count based adjustments
+        session_duration = current_time - self._session_start_time
+
+        # Gradually increase wait time as session progresses
+        if session_duration > 5400:  # After 1.5 hours
+            session_multiplier = 1 + (session_duration - 5400) / 14400  # +50% after 5.5 hours
+            enhanced_wait *= min(session_multiplier, 1.5)  # Cap at 1.5x
+
+        # 4. Frequency-based adjustments (recent request density)
+        recent_requests = self._count_recent_requests(current_time, 600)  # Last 10 minutes
+        if recent_requests > 20:
+            frequency_multiplier = 1 + (recent_requests - 20) / 40
+            enhanced_wait *= min(frequency_multiplier, 2.0)  # Cap at 2x
+
+        # 5. Check if a break is needed
+        if self._should_take_human_break(current_time):
+            break_time = self._calculate_break_duration()
+            enhanced_wait = max(enhanced_wait, break_time)
+            self._last_break_time = current_time + break_time
+            self._request_count = 0
+
+            if hasattr(self._context, 'log') and not self._context.quiet:
+                self._context.log(f"[ANTI-DETECTION] Taking human-like break: {break_time:.1f}s")
+
+        # 6. Minimum base wait time for very active periods
+        if recent_requests > 20:
+            enhanced_wait = max(enhanced_wait, 5.0)  # Minimum 5 seconds
+
+        return enhanced_wait
+
+    def _count_recent_requests(self, current_time: float, window_seconds: float) -> int:
+        """Count requests in the recent time window."""
+        count = 0
+        for timestamps in self._query_timestamps.values():
+            count += sum(1 for t in timestamps if t > current_time - window_seconds)
+        return count
+
+    def _should_take_human_break(self, current_time: float) -> bool:
+        """Determine if a human-like break should be taken."""
+        session_duration = current_time - self._session_start_time
+
+        # Break conditions
+        if (current_time - self._last_break_time > self._break_threshold_time or  # 60+ minutes since last break
+            self._request_count > self._break_threshold_requests or  # 150+ requests
+            session_duration > 14400):  # 4+ hours total session
+            return True
+
+        # Random break (1% chance)
+        return random.random() < 0.01
+
+    def _calculate_break_duration(self) -> float:
+        """Calculate a realistic break duration."""
+        # Base break time with some randomness
+        base_break = random.uniform(self._min_break_time, self._max_break_time)
+
+        # Longer breaks for longer sessions
+        session_duration = time.monotonic() - self._session_start_time
+        if session_duration > 3600:  # After 1 hour
+            base_break *= 1.5
+        if session_duration > 7200:  # After 2 hours
+            base_break *= 2.0
+
+        return min(base_break, 600)  # Cap at 10 minutes
+
     def wait_before_query(self, query_type: str) -> None:
-        """This method is called before a query to Instagram.
+        """Enhanced query waiting with human behavior simulation.
 
         It calls :meth:`RateController.query_waittime` to determine the time needed to wait and then calls
         :meth:`RateController.sleep` to wait until the request can be made."""
+
         waittime = self.query_waittime(query_type, time.monotonic(), False)
         assert waittime >= 0
         if waittime > 15:

@@ -38,7 +38,6 @@ def usage_string():
     return """
 {0} [--comments] [--geotags]
 {2:{1}} [--stories] [--highlights] [--tagged] [--reels] [--igtv]
-{2:{1}} [--hashtag-top-serp]
 {2:{1}} [--login YOUR-USERNAME] [--fast-update]
 {2:{1}} profile | "#hashtag" | %%location_id | :stories | :feed | :saved
 {0} --help""".format(argv0, len(argv0), '')
@@ -148,7 +147,9 @@ def _main(instaloader: Instaloader, targetlist: List[str],
           storyitem_filter_str: Optional[str] = None,
           browser: Optional[str] = None,
           cookiefile: Optional[str] = None,
-          hashtag_top_serp: bool = False) -> ExitCode:
+          monitor_interval: int = 300,
+          monitor_max_posts: int = 50,
+          monitor_state_file: Optional[str] = None) -> ExitCode:
     """Download set of profiles, hashtags etc. and handle logging in and session files if desired."""
     # Parse and generate filter function
     post_filter = None
@@ -244,24 +245,9 @@ def _main(instaloader: Instaloader, targetlist: List[str],
                         instaloader.save_profile_id(followee)
                         profiles.add(followee)
                 elif re.match(r"^#\w+$", target):
-                    if hashtag_top_serp:
-                        instaloader.download_hashtag_top_serp(
-                            hashtag=target[1:],
-                            max_count=max_count,
-                            fast_update=fast_update,
-                            post_filter=post_filter,
-                            profile_pic=download_profile_pic,
-                            posts=download_posts
-                        )
-                    else:
-                        instaloader.download_hashtag(
-                            hashtag=target[1:],
-                            max_count=max_count,
-                            fast_update=fast_update,
-                            post_filter=post_filter,
-                            profile_pic=download_profile_pic,
-                            posts=download_posts
-                        )
+                    instaloader.download_hashtag(hashtag=target[1:], max_count=max_count, fast_update=fast_update,
+                                                 post_filter=post_filter,
+                                                 profile_pic=download_profile_pic, posts=download_posts)
                 elif re.match(r"^-[A-Za-z0-9-_]+$", target):
                     instaloader.download_post(Post.from_shortcode(instaloader.context, target[1:]), target)
                 elif re.match(r"^%[0-9]+$", target):
@@ -275,6 +261,10 @@ def _main(instaloader: Instaloader, targetlist: List[str],
                 elif target == ":saved":
                     instaloader.download_saved_posts(fast_update=fast_update, max_count=max_count,
                                                      post_filter=post_filter)
+                elif target == ":monitor-feed":
+                    instaloader.monitor_follow_feed(interval=monitor_interval,
+                                                   max_posts=monitor_max_posts,
+                                                   state_file=monitor_state_file)
                 elif re.match(r"^[A-Za-z0-9._]+$", target):
                     download_profile_content = download_posts or download_tagged or download_reels or download_igtv
                     try:
@@ -390,6 +380,8 @@ def main():
                            help="Download the stories of your followees. Requires login.")
     g_targets.add_argument('_saved', nargs='*', metavar=":saved",
                            help="Download the posts that you marked as saved. Requires login.")
+    g_targets.add_argument('_monitor_feed', nargs='*', metavar=":monitor-feed",
+                           help="Monitor follow feed for new posts from followed accounts. Requires login.")
     g_targets.add_argument('_singlepost', nargs='*', metavar="-- -shortcode",
                            help="Download the post with the given shortcode")
     g_targets.add_argument('_json', nargs='*', metavar="filename.json[.xz]",
@@ -407,8 +399,6 @@ def main():
                         help="Do not download regular posts.")
     g_prof.add_argument('--no-profile-pic', action='store_true',
                         help='Do not download profile picture.')
-    g_prof.add_argument('--hashtag-top-serp', dest='hashtag_top_serp', action='store_true',
-                        help='Download top SERP posts for hashtags instead of the usual chronological order.')
     g_post.add_argument('--slide', action='store',
                         help='Set what image/interval of a sidecar you want to download.')
     g_post.add_argument('--no-pictures', action='store_true',
@@ -474,6 +464,14 @@ def main():
                         help='Do not attempt to download more than COUNT posts. '
                              'Applies to #hashtag, %%location_id, :feed, and :saved.')
 
+    g_monitor = parser.add_argument_group('Feed Monitoring Options')
+    g_monitor.add_argument('--monitor-interval', type=int, default=300, metavar='SECONDS',
+                          help='Monitoring interval in seconds for :monitor-feed (default: 300)')
+    g_monitor.add_argument('--monitor-max-posts', type=int, default=50, metavar='COUNT',
+                          help='Maximum number of posts to check per monitoring cycle (default: 50)')
+    g_monitor.add_argument('--monitor-state-file', metavar='FILE',
+                          help='File to store monitoring state (default: follow_feed_state.json)')
+
     g_login = parser.add_argument_group('Login (Download Private Profiles)',
                                         'Instaloader can login to Instagram. This allows downloading private profiles. '
                                         'To login, pass the --login option. Your session cookie (not your password!) '
@@ -534,6 +532,10 @@ def main():
                             'retry logic.')
     g_how.add_argument('--no-iphone', action='store_true',
                         help='Do not attempt to download iPhone version of images and videos.')
+
+    g_anti = parser.add_argument_group('Anti-detection Options')
+    g_anti.add_argument('--no-anti-detection', action='store_true',
+                        help='Disable anti-detection features (use original Instaloader behavior).')
 
     g_misc = parser.add_argument_group('Miscellaneous Options')
     g_misc.add_argument('-q', '--quiet', action='store_true',
@@ -599,7 +601,8 @@ def main():
                              fatal_status_codes=args.abort_on,
                              iphone_support=not args.no_iphone,
                              title_pattern=args.title_pattern,
-                             sanitize_paths=args.sanitize_paths)
+                             sanitize_paths=args.sanitize_paths,
+                             no_anti_detection=args.no_anti_detection)
         exit_code = _main(loader,
                           args.profile,
                           username=args.login.lower() if args.login is not None else None,
@@ -619,7 +622,9 @@ def main():
                           storyitem_filter_str=args.storyitem_filter,
                           browser=args.load_cookies,
                           cookiefile=args.cookiefile,
-                          hashtag_top_serp=args.hashtag_top_serp)
+                          monitor_interval=args.monitor_interval,
+                          monitor_max_posts=args.monitor_max_posts,
+                          monitor_state_file=args.monitor_state_file)
         loader.close()
         if loader.has_stored_errors:
             exit_code = ExitCode.NON_FATAL_ERROR

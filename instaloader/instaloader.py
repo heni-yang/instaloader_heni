@@ -7,6 +7,7 @@ import shutil
 import string
 import sys
 import tempfile
+import time
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from functools import wraps
@@ -232,11 +233,16 @@ class Instaloader:
                  fatal_status_codes: Optional[List[int]] = None,
                  iphone_support: bool = True,
                  title_pattern: Optional[str] = None,
-                 sanitize_paths: bool = False):
+                 sanitize_paths: bool = False,
+                 no_anti_detection: bool = False):
 
         self.context = InstaloaderContext(sleep, quiet, user_agent, max_connection_attempts,
                                           request_timeout, rate_controller, fatal_status_codes,
                                           iphone_support)
+
+        # Anti-detection 비활성화 옵션 처리
+        if no_anti_detection:
+            self.context._rate_controller._human_behavior_enabled = False
 
         # configuration parameters
         self.dirname_pattern = dirname_pattern or "{target}"
@@ -737,19 +743,20 @@ class Instaloader:
                         suffix: Optional[str] = str(edge_number)
                         if '{filename}' in self.filename_pattern:
                             suffix = None
-                        if self.download_pictures and (not sidecar_node.is_video or self.download_video_thumbnails):
+                        video_url = sidecar_node.video_url
+                        if self.download_pictures and (video_url is None or self.download_video_thumbnails):
                             # pylint:disable=cell-var-from-loop
                             sidecar_filename = self.__prepare_filename(filename_template,
                                                                        lambda: sidecar_node.display_url)
                             # Download sidecar picture or video thumbnail (--no-pictures implies --no-video-thumbnails)
                             downloaded &= self.download_pic(filename=sidecar_filename, url=sidecar_node.display_url,
                                                             mtime=post.date_local, filename_suffix=suffix)
-                        if sidecar_node.is_video and self.download_videos:
+                        if video_url is not None and self.download_videos:
                             # pylint:disable=cell-var-from-loop
                             sidecar_filename = self.__prepare_filename(filename_template,
-                                                                       lambda: sidecar_node.video_url)
+                                                                       lambda: video_url)
                             # Download sidecar video if desired
-                            downloaded &= self.download_pic(filename=sidecar_filename, url=sidecar_node.video_url,
+                            downloaded &= self.download_pic(filename=sidecar_filename, url=video_url,
                                                             mtime=post.date_local, filename_suffix=suffix)
                 else:
                     downloaded = False
@@ -959,6 +966,11 @@ class Instaloader:
         .. versionchanged:: 4.3
            Also downloads and saves the Highlight's cover pictures.
 
+        .. versionchanged:: 4.16
+           Add progress output for highlight retrieval, displaying a counter of the current
+           highlight number and the total number of highlights being processed. This provides
+           feedback similar to the per-item download counter already present in this function.
+
         :param user: ID or Profile of the user whose highlights should get downloaded.
         :param fast_update: If true, abort when first already-downloaded picture is encountered
         :param filename_target: Replacement for {target} in dirname_pattern and filename_pattern
@@ -966,14 +978,20 @@ class Instaloader:
         :param storyitem_filter: function(storyitem), which returns True if given StoryItem should be downloaded
         :raises LoginRequiredException: If called without being logged in.
         """
-        for user_highlight in self.get_highlights(user):
+        user_highlights = list(self.get_highlights(user))
+        hl_size = len(user_highlights)
+        for hl_number, user_highlight in enumerate(user_highlights, start=1):
             name = user_highlight.owner_username
             highlight_target: Union[str, Path] = (filename_target
                                 if filename_target
                                 else (Path(_PostPathFormatter.sanitize_path(name, self.sanitize_paths)) /
                                       _PostPathFormatter.sanitize_path(user_highlight.title,
                                                                        self.sanitize_paths)))
-            self.context.log("Retrieving highlights \"{}\" from profile {}".format(user_highlight.title, name))
+            self.context.log(
+                "[{0:{w}d}/{1:{w}d}] Retrieving highlights \"{2}\" from profile {3}".format(
+                    hl_number, hl_size, user_highlight.title, name, w=len(str(hl_size))
+                )
+            )
             self.download_highlight_cover(user_highlight, highlight_target)
             totalcount = user_highlight.itemcount
             count = 1
@@ -996,7 +1014,7 @@ class Instaloader:
                             post_filter: Optional[Callable[[Post], bool]] = None,
                             max_count: Optional[int] = None,
                             total_count: Optional[int] = None,
-                            owner_profile: Optional[Profile] = None,
+                            owner_profile: Optional[Profile] = None,  # pylint: disable=unused-argument
                             takewhile: Optional[Callable[[Post], bool]] = None,
                             possibly_pinned: int = 0) -> None:
         """
@@ -1037,7 +1055,7 @@ class Instaloader:
                 load=load_structure_from_file,
                 save=save_structure_to_file,
                 format_path=lambda magic: self.format_filename_within_target_path(
-                    sanitized_target, owner_profile, self.resume_prefix or '', magic, 'json.xz'
+                    sanitized_target, None, self.resume_prefix or '', magic, 'json.xz'
                 ),
                 check_bbd=self.check_resume_bbd,
                 enabled=True  # 강제로 resume 기능 활성화
@@ -1048,17 +1066,17 @@ class Instaloader:
                     continue
                 if (max_count is not None and number > max_count) or should_stop:
                     break
-                
+
                 # 매 포스트마다 resume 파일 업데이트 (진행 상태 저장)
-                if self.resume_prefix and hasattr(posts, 'freeze'):
+                if self.resume_prefix and hasattr(posts, 'freeze') and hasattr(posts, 'magic'):
                     try:
                         current_frozen = posts.freeze()
                         resume_file_path = self.format_filename_within_target_path(
-                            sanitized_target, owner_profile, self.resume_prefix or '', posts.magic, 'json.xz'
+                            sanitized_target, None, self.resume_prefix or '', posts.magic, 'json.xz'
                         )
                         save_structure_to_file(current_frozen, resume_file_path)
                         self.context.log(f"[RESUME DEBUG] 진행 상태 저장: {number}번째 포스트, total_index={current_frozen.total_index}")
-                    except Exception as e:
+                    except (OSError, IOError) as e:
                         self.context.log(f"[RESUME DEBUG] 진행 상태 저장 실패: {e}")
                 if displayed_count is not None:
                     self.context.log("[{0:{w}d}/{1:{w}d}] ".format(number, displayed_count,
@@ -1094,17 +1112,17 @@ class Instaloader:
                         # disengage fast_update for first post when resuming
                         if not is_resuming or number > 0:
                             break
-            
+
             # 다운로드 완료 시 resume 파일 삭제
             if self.resume_prefix and hasattr(posts, 'magic'):
                 try:
                     resume_file_path = self.format_filename_within_target_path(
-                        sanitized_target, owner_profile, self.resume_prefix or '', posts.magic, 'json.xz'
+                        sanitized_target, None, self.resume_prefix or '', posts.magic, 'json.xz'
                     )
                     if os.path.isfile(resume_file_path):
                         os.unlink(resume_file_path)
                         self.context.log("Download complete, deleted resume file: {}".format(resume_file_path))
-                except Exception:
+                except (OSError, IOError):
                     pass  # 삭제 실패 시 무시
 
     @_requires_login
@@ -1115,6 +1133,8 @@ class Instaloader:
         :raises LoginRequiredException: If called without being logged in.
         """
         import json
+        import logging
+        _feed_api_logger = logging.getLogger("feed_poller")
         from instaloader.instaloadercontext import copy_session
         
         doc_id = "26171541555817400"
@@ -1146,14 +1166,37 @@ class Instaloader:
                                           params={'doc_id': doc_id, 'variables': variables_json},
                                           session=tmpsession)
 
-        data = custom_query(variables).get("data")
+        _api_response = custom_query(variables)
+        data = _api_response.get("data") if isinstance(_api_response, dict) else None
         
         while True:
             if data is None:
+                _resp_keys = list(_api_response.keys()) if isinstance(_api_response, dict) else type(_api_response).__name__
+                _errors = _api_response.get("errors", []) if isinstance(_api_response, dict) else []
+                if _errors:
+                    _err_msg = "; ".join(e.get("message", "?") for e in _errors if isinstance(e, dict))
+                    _severity = ", ".join(set(e.get("severity", "?") for e in _errors if isinstance(e, dict)))
+                    _feed_api_logger.warning(
+                        "[get_feed_posts] API 에러 응답: %s (severity: %s). 세션 challenge/만료 가능성 → Firefox 재로그인 후 세션 재생성 필요",
+                        _err_msg, _severity
+                    )
+                    print(f"[FeedPoller] 🛑 get_feed_posts: API 에러 — {_err_msg} (severity: {_severity}). 세션 재생성이 필요할 수 있습니다.")
+                else:
+                    _feed_api_logger.warning(
+                        "[get_feed_posts] data=None. 응답 키: %s, 미리보기: %.500s",
+                        _resp_keys, str(_api_response)
+                    )
+                    print(f"[FeedPoller] ⚠️ get_feed_posts: data=None — API 응답 이상. 키: {_resp_keys}")
                 return
             
             feed = data.get("xdt_api__v1__feed__timeline__connection")
             if feed is None:
+                _data_keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+                _feed_api_logger.warning(
+                    "[get_feed_posts] feed 키 누락. data 키: %s, 미리보기: %.500s",
+                    _data_keys, str(data)
+                )
+                print(f"[FeedPoller] ⚠️ get_feed_posts: feed 키 없음. data 키: {_data_keys}")
                 return
                 
             for edge in feed.get("edges", []):
@@ -1181,12 +1224,17 @@ class Instaloader:
                         
                     yield Post(self.context, target_media)
                     
+            if not feed.get("edges"):
+                _feed_keys = list(feed.keys()) if isinstance(feed, dict) else '?'
+                _feed_api_logger.info("[get_feed_posts] edges 비어있음. feed 키: %s", _feed_keys)
+                print(f"[FeedPoller] ⚠️ get_feed_posts: edges 비어있음. feed 키: {_feed_keys}")
             page_info = feed.get("page_info", {})
             if not page_info.get("has_next_page", False):
                 break
                 
             variables["after"] = page_info.get("end_cursor", "")
-            data = custom_query(variables).get("data")
+            _api_response = custom_query(variables)
+            data = _api_response.get("data") if isinstance(_api_response, dict) else None
 
     @_requires_login
     def download_feed_posts(self, max_count: Optional[int] = None, fast_update: bool = False,
@@ -1225,6 +1273,97 @@ class Instaloader:
         self.posts_download_loop(node_iterator, ":saved",
                                  fast_update, post_filter,
                                  max_count=max_count, total_count=node_iterator.count)
+
+    @_requires_login
+    def monitor_follow_feed(self, interval: int = 300, max_posts: int = 50,
+                           state_file: Optional[str] = None) -> None:
+        """
+        Monitor follow feed for new posts from followed accounts.
+
+        :param interval: Monitoring interval in seconds (default: 300 = 5 minutes)
+        :param max_posts: Maximum number of posts to check per monitoring cycle
+        :param state_file: File to store monitoring state (default: follow_feed_state.json)
+        :raises LoginRequiredException: If called without being logged in.
+        """
+        if state_file is None:
+            state_file = "follow_feed_state.json"
+
+        # Load previous state
+        try:
+            with open(state_file, 'r') as f:
+                state = json.load(f)
+                last_checked_posts = set(state.get('last_checked_posts', []))
+        except (FileNotFoundError, json.JSONDecodeError):
+            last_checked_posts = set()
+            state = {'last_checked_posts': [], 'monitoring_stats': {'total_checks': 0, 'new_posts_found': 0}}
+
+        self.context.log("Follow feed monitoring started (interval: {}s)".format(interval))
+        self.context.log("Press Ctrl+C to stop monitoring")
+
+        try:
+            while True:
+                try:
+                    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    self.context.log("[{}] Checking feed for new posts...".format(current_time))
+
+                    # Get recent posts from feed
+                    current_posts = []
+                    try:
+                        for i, post in enumerate(self.get_feed_posts()):
+                            current_posts.append(post)
+                            if i >= max_posts - 1:
+                                break
+                    except (ConnectionException, LoginException, InstaloaderException) as e:
+                        self.context.log("Error getting feed posts: {}".format(e))
+                        continue
+
+                    # Find new posts
+                    new_posts = []
+                    for post in current_posts:
+                        if post.shortcode not in last_checked_posts:
+                            new_posts.append(post)
+
+                    if new_posts:
+                        self.context.log("🎉 Found {} new post(s)!".format(len(new_posts)))
+                        for post in new_posts:
+                            caption_preview = post.caption[:50] if post.caption else 'No caption'
+                            self.context.log("  📸 @{}: {}...".format(post.owner_username, caption_preview))
+                            post_time = post.date_local.strftime('%Y-%m-%d %H:%M:%S')
+                            self.context.log("     Time: {}".format(post_time))
+                            self.context.log("     Likes: {}, Comments: {}".format(post.likes, post.comments))
+
+                        state['monitoring_stats']['new_posts_found'] += len(new_posts)
+                    else:
+                        self.context.log("No new posts found")
+
+                    # Update state
+                    last_checked_posts = {post.shortcode for post in current_posts[:20]}  # Keep last 20
+                    state['last_checked_posts'] = list(last_checked_posts)
+                    state['monitoring_stats']['total_checks'] += 1
+                    state['last_check_time'] = datetime.now().isoformat()
+
+                    # Save state
+                    with open(state_file, 'w') as f:
+                        json.dump(state, f, indent=2)
+
+                    self.context.log("Next check in {} seconds...".format(interval))
+                    time.sleep(interval)
+
+                except KeyboardInterrupt:
+                    self.context.log("\nMonitoring stopped by user")
+                    break
+                except (ConnectionException, LoginException, InstaloaderException) as e:
+                    self.context.log("Error during monitoring: {}".format(e))
+                    self.context.log("Retrying in 60 seconds...")
+                    time.sleep(60)
+
+        finally:
+            # Save final state
+            with open(state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+            self.context.log("Monitoring state saved to {}".format(state_file))
+            self.context.log("Total checks: {}".format(state['monitoring_stats']['total_checks']))
+            self.context.log("New posts found: {}".format(state['monitoring_stats']['new_posts_found']))
 
     @_requires_login
     def get_location_posts(self, location: str) -> Iterator[Post]:
