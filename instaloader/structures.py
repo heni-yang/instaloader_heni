@@ -988,12 +988,13 @@ class Profile:
                     raise ProfileNotExistsException('Profile {} has no user ID.'.format(self.username))
                 variables = {
                     "id": str(user_id),
-                    "render_surface": "PROFILE",
+                    "enable_integrity_filters": True,
                     "__relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider": True,
                     "__relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider": False,
+                    "__relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider": False,
                     "__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider": False,
                 }
-                data = self._context.doc_id_graphql_query('25980296051578533', variables)
+                data = self._context.doc_id_graphql_query('27937681195819736', variables)
                 if data is None:
                     raise QueryReturnedNotFoundException('GraphQL query returned None')
                 user_data = data.get('data', {}).get('user')
